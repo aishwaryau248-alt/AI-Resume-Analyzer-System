@@ -108,30 +108,38 @@ This project automates the resume evaluation process by analyzing candidate skil
 
 ## System Architecture
 
-User
-|
-v
-Streamlit Frontend
-|
-v
-FastAPI Backend
-|
-+------------------------------+
-| Resume Upload Module         |
-| Skill Extraction Module      |
-| Job Matching Module          |
-| Resume Scoring Engine        |
-| AI Recommendation Module     |
-+------------------------------+
-|
-v
-Database
-|
-v
-Hugging Face API
+## System Architecture
 
----
-
+```text
+                +------------------+
+                |      User        |
+                +--------+---------+
+                         |
+                         v
+                +------------------+
+                | Streamlit UI     |
+                | (Frontend)       |
+                +--------+---------+
+                         |
+                         v
+                +------------------+
+                | FastAPI Backend  |
+                +--------+---------+
+                         |
+      +------------------+------------------+
+      |                  |                  |
+      v                  v                  v
++-------------+  +--------------+  +------------------+
+| Resume      |  | Skill        |  | AI Recommendation|
+| Upload      |  | Matching     |  | Module           |
+| Module      |  | Module       |  | (Hugging Face)   |
++-------------+  +--------------+  +------------------+
+                         |
+                         v
+                +------------------+
+                | MySQL Database   |
+                +------------------+
+```
 ## Project Structure
 
 resume_ai_system/
