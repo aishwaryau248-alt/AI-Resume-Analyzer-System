@@ -515,6 +515,11 @@ Maintaining relationships between resumes and analysis results.
 Managing invalid uploads and missing records.
 
 ---
+## Demo Video
+
+🎥 Watch the complete project demo:
+
+[https://youtu.be/your_video_link](https://youtu.be/_EoMX2bh0Zw?si=BJz3kfwHjQe1ofL0)
 
 ## Future Enhancements
 
@@ -539,8 +544,8 @@ The AI Resume Analyzer System successfully automates resume evaluation by combin
 
 ## Author
 
-Name: Your Name
+Name: AISHWARYA UNNIKRISHNAN
 
-Email: [your_email@example.com](mailto:your_email@example.com)
+Email: [aishwaryau248@gmail.com](mailto:aishwaryau248@gmail.com)
 
-GitHub: https://github.com/yourusername
+GitHub: https://github.com/aishwaryau248-alt
