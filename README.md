@@ -142,38 +142,34 @@ This project automates the resume evaluation process by analyzing candidate skil
 ```
 ## Project Structure
 
+## Project Structure
+
+```text
 resume_ai_system/
-
-backend/
 │
-├── routes/
-├── models/
-├── schemas/
-├── services/
-├── database/
-└── new.py
-
-frontend/
+├── backend/
+│   ├── routes/
+│   ├── models/
+│   ├── schemas/
+│   ├── services/
+│   ├── database/
+│   └── new.py
 │
-└── ui.py
-
-ml/
+├── frontend/
+│   └── ui.py
 │
-├── skill_extractor/
-├── matching/
-└── scoring/
-
-uploads/
-
-requirements.txt
-
-README.md
-
-.env
-
-.gitignore
-
----
+├── ml/
+│   ├── skill_extractor/
+│   ├── matching/
+│   └── scoring/
+│
+├── uploads/
+│
+├── requirements.txt
+├── README.md
+├── .env
+└── .gitignore
+```
 
 ## Database Design
 
