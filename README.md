@@ -468,36 +468,6 @@ Handles:
 
 ---
 
-## Screenshots
-
-### Home Page
-
-Insert Screenshot
-
-### Upload Resume
-
-Insert Screenshot
-
-### Analysis Results
-
-Insert Screenshot
-
-### AI Recommendation Output
-
-Insert Screenshot
-
-### Analysis History
-
-Insert Screenshot
-
-### Dashboard Analytics
-
-Insert Screenshot
-
----
-
-## Challenges Faced
-
 ### Resume Parsing
 
 Different resume formats resulted in inconsistent text extraction.
