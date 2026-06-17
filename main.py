@@ -5,13 +5,13 @@ from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 import os
 from sqlalchemy import (
     create_engine, Column, Integer, String,
-    ForeignKey, Text, DateTime, Float,text
+    ForeignKey, Text, DateTime, Float, text
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from recomendation_service import get_ai_recommendations
-import pandas as pd
-
-esco_df = pd.read_csv("role_skill_map.csv")
+from recomendation_service import (
+    get_ai_recommendations,
+    analyze_resume_ai
+)
 
 # ---------------- DATABASE ---------------------------------
 
@@ -50,117 +50,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# ---------------- ROLE SKILLS ----------------
-
-ROLE_SKILLS = {
-    "Data Scientist": ["python", "sql", "machine learning", "pandas", "numpy", "statistics", "tensorflow"],
-    "Data Analyst": ["excel", "sql", "power bi", "tableau", "python", "statistics"],
-    "Backend Developer": ["python", "fastapi", "postgresql", "docker", "api"],
-    "Frontend Developer": ["html", "css", "javascript", "react", "bootstrap"],
-    "Full Stack Developer": ["html", "css", "javascript", "react", "python", "sql"],
-    "AI Engineer": ["python", "tensorflow", "pytorch", "nlp", "llm"],
-    "Machine Learning Engineer": ["python", "scikit-learn", "tensorflow", "pandas", "numpy"],
-    "DevOps Engineer": ["docker", "kubernetes", "aws", "linux", "jenkins"],
-    "Cloud Engineer": ["aws", "azure", "gcp", "docker", "linux"],
-    "Cyber Security Analyst": ["network security", "ethical hacking", "siem", "linux", "firewall"],
-    "Software Engineer": ["python", "java", "sql", "git", "algorithms"],
-    "Java Developer": ["java", "spring boot", "hibernate", "mysql", "maven"],
-    "Python Developer": ["python", "django", "flask", "sql", "api"],
-    "Mobile App Developer": ["android", "kotlin", "java", "flutter", "firebase"],
-    "Android Developer": ["android", "java", "kotlin", "sqlite", "firebase"],
-    "iOS Developer": ["swift", "ios", "xcode", "objective-c", "api"],
-    "Database Administrator": ["sql", "mysql", "postgresql", "backup", "performance tuning"],
-    "Business Analyst": ["excel", "sql", "power bi", "communication", "requirements gathering"],
-    "QA Engineer": ["selenium", "testing", "automation", "jira", "api testing"],
-    "Project Manager": ["agile", "scrum", "jira", "leadership", "risk management"],
-}
-
-ROLE_MAPPING = {
-    "data analyst": "Data Analyst",
-    "data warehouse designer": "Data Analyst",
-    "business intelligence analyst": "Data Analyst",
-    "data scientist": "Data Scientist",
-    "machine learning engineer": "Machine Learning Engineer",
-    "python developer": "Python Developer",
-    "backend developer": "Backend Developer",
-    "frontend developer": "Frontend Developer",
-    "full stack developer": "Full Stack Developer",
-    "devops engineer": "DevOps Engineer",
-    "cloud engineer": "Cloud Engineer",
-    "business analyst": "Business Analyst",
-    "software engineer": "Software Engineer",
-}
-
-
-def detect_role_esco(resume_text: str, min_confidence: float = 0.01):
-    """
-    Match resume text against the ESCO role/skill map.
-
-    Returns a dict {"role": <name>, "skills": [...], "ratio": float}
-    for the best-matching row, or None if nothing clears the
-    minimum confidence threshold. The skill list is returned so the
-    caller can score against it even if this role isn't one of the
-    20 curated entries in ROLE_SKILLS.
-    """
-    text = resume_text.lower()
-
-    best_role = None
-    best_skills = []
-    best_ratio = 0.0
-
-    for _, row in esco_df.iterrows():
-        role = row["role"]
-        skills = [s.strip() for s in str(row["skills"]).lower().split(", ") if s.strip()]
-        if not skills:
-            continue
-
-        matches = sum(
-            1 for skill in skills
-            if re.search(r'\b' + re.escape(skill) + r'\b', text)
-        )
-        ratio = matches / len(skills)
-
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_role = role
-            best_skills = skills
-
-    print("BEST ROLE:", best_role)
-    print("BEST RATIO:", best_ratio)
-
-    if best_ratio < min_confidence:
-     return None
-
-    return {"role": best_role, "skills": best_skills, "ratio": best_ratio}
-
-
-def detect_role(
-    resume_text: str,
-    min_confidence: float = 0.03
-):
-    """
-    Curated keyword-based fallback. Returns None if the resume
-    matches zero skills across every known role (instead of
-    defaulting to the first dict entry).
-    """
-    text = resume_text.lower()
-    role_scores = {
-        role: sum(1 for skill in skills if skill.lower() in text)
-        for role, skills in ROLE_SKILLS.items()
-    }
-
-    best_role = max(role_scores, key=role_scores.get)
-
-    if role_scores[best_role] == 0:
-        return None
-
-    return best_role
-
-
-# ---------------- HELPERS ----------------
-
+os.makedirs(UPLOAD_DIR, exist_ok=True) 
 def get_db():
     db = SessionLocal()
     try:
@@ -169,25 +59,18 @@ def get_db():
         db.close()
 
 
-def extract_skills(text: str, required_skills: list) -> list:
-    return [skill for skill in required_skills if skill.lower() in text.lower()]
-
-
 def calculate_ats_score(
     resume: Resume,
     found_skills: list,
     missing_skills: list,
-    required_skills: list
 ) -> tuple[int, str]:
 
     resume_text = resume.extracted_text
     text_lower = resume_text.lower()
 
     # 1. SKILL MATCH (50 Points)
-    skill_ratio = (
-        len(found_skills) / len(required_skills)
-        if required_skills else 0
-    )
+    total_skills = len(found_skills) + len(missing_skills)
+    skill_ratio = (len(found_skills) / total_skills) if total_skills else 0
     skill_score = round(skill_ratio * 50)
 
     # 2. SECTION SCORE (15 Points)
@@ -274,57 +157,21 @@ def calculate_ats_score(
 
 def run_analysis(resume: Resume) -> dict:
 
-    role = None
-    required_skills = None
-
     # ---------------------------
-    # STEP 1: MANUAL ROLE CHECK
+    # STEP 1: AI ROLE + SKILL DETECTION (Hugging Face)
     # ---------------------------
 
-    manual_role = detect_role(
-        resume.extracted_text
-    )
+    ai_result = analyze_resume_ai(resume.extracted_text)
 
-    if manual_role:
-        role = manual_role
-        required_skills = ROLE_SKILLS[
-            manual_role
-        ]
-
-        print(
-            "MANUAL ROLE FOUND:",
-            role
-        )
+    role = (ai_result.get("predicted_role") or "").strip()
+    found_skills = [s for s in ai_result.get("found_skills", []) if s]
+    missing_skills = [s for s in ai_result.get("missing_skills", []) if s]
 
     # ---------------------------
-    # STEP 2: ESCO FALLBACK
+    # STEP 2: NO ROLE FOUND
     # ---------------------------
 
-    if role is None:
-
-        esco_match = detect_role_esco(
-            resume.extracted_text
-        )
-
-        if esco_match:
-
-            role = esco_match["role"]
-
-            required_skills = (
-                esco_match["skills"]
-            )
-
-            print(
-                "ESCO ROLE FOUND:",
-                role
-            )
-
-    # ---------------------------
-    # STEP 3: NO ROLE FOUND
-    # ---------------------------
-
-    if role is None:
-
+    if not role or role.lower() == "unknown":
         return {
             "predicted_role": "Unknown",
             "ats_score": 0,
@@ -341,36 +188,13 @@ def run_analysis(resume: Resume) -> dict:
         }
 
     # ---------------------------
-    # STEP 4: SKILL ANALYSIS
+    # STEP 3: SCORE CALCULATION
     # ---------------------------
 
-    found_skills = extract_skills(
-        resume.extracted_text,
-        required_skills
-    )
+    total_skills = len(found_skills) + len(missing_skills)
+    role_match_score = round((len(found_skills) / total_skills) * 100, 2) if total_skills else 0.0
 
-    missing_skills = [
-        skill
-        for skill in required_skills
-        if skill not in found_skills
-    ]
-
-    role_match_score = round(
-        (
-            len(found_skills)
-            / len(required_skills)
-        ) * 100,
-        2
-    )
-
-    ats_score, ats_status = (
-        calculate_ats_score(
-            resume,
-            found_skills,
-            missing_skills,
-            required_skills
-        )
-    )
+    ats_score, ats_status = calculate_ats_score(resume, found_skills, missing_skills)
 
     # ---------------------------
     # STRENGTHS
@@ -379,19 +203,13 @@ def run_analysis(resume: Resume) -> dict:
     strengths = []
 
     if found_skills:
-        strengths.append(
-            f"Matched {len(found_skills)} required skills"
-        )
+        strengths.append(f"Matched {len(found_skills)} relevant skills")
 
     if "%" in resume.extracted_text:
-        strengths.append(
-            "Contains quantified achievements"
-        )
+        strengths.append("Contains quantified achievements")
 
     if len(resume.extracted_text) > 800:
-        strengths.append(
-            "Detailed resume content"
-        )
+        strengths.append("Detailed resume content")
 
     # ---------------------------
     # IMPROVEMENTS
@@ -400,31 +218,23 @@ def run_analysis(resume: Resume) -> dict:
     improvements = []
 
     if missing_skills:
-        improvements.append(
-            f"Add missing skills: {', '.join(missing_skills)}"
-        )
+        improvements.append(f"Add missing skills: {', '.join(missing_skills)}")
 
     if "%" not in resume.extracted_text:
-        improvements.append(
-            "Add measurable achievements using numbers and percentages"
-        )
+        improvements.append("Add measurable achievements using numbers and percentages")
 
     if len(resume.extracted_text) < 500:
-        improvements.append(
-            "Add more project and work experience details"
-        )
+        improvements.append("Add more project and work experience details")
 
     # ---------------------------
     # AI RECOMMENDATIONS
     # ---------------------------
 
-    recommendations = (
-        get_ai_recommendations(
-            role,
-            role_match_score,
-            found_skills,
-            missing_skills
-        )
+    recommendations = get_ai_recommendations(
+        role,
+        role_match_score,
+        found_skills,
+        missing_skills
     )
 
     summary = (
@@ -475,41 +285,37 @@ async def upload_resume(
         buffer.write(content)
 
     # Extract text
-    text = ""
+    extracted_text = ""
     if extension == ".pdf":
         try:
             with pdfplumber.open(file_path) as pdf:
                 for page in pdf.pages:
                     page_text = page.extract_text()
                     if page_text:
-                        text += page_text + "\n"
+                        extracted_text += page_text + "\n"
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"PDF extraction failed: {str(e)}")
-    if not text.strip():
+
+    if not extracted_text.strip():
         raise HTTPException(
             status_code=400,
             detail="Could not extract text from the file."
         )
 
     print("========== EXTRACTED TEXT ==========")
-    print(text[:3000])
-
-    esco_result = detect_role_esco(text)
-
-    print("========== ESCO RESULT ==========")
-    print(esco_result)
+    print(extracted_text[:3000])
 
     # Save resume
     resume = Resume(
         file_name=file.filename,
-        extracted_text=text
+        extracted_text=extracted_text
     )
 
     db.add(resume)
     db.commit()
     db.refresh(resume)
 
-    # Auto analyze
+    # Auto analyze (Hugging Face powered)
     result = run_analysis(resume)
 
     # Save analysis result
