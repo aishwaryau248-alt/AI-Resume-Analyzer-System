@@ -286,16 +286,16 @@ if page == "Upload & Analyze":
     # ── User Info Fields ──
     col_name, col_email = st.columns(2)
     with col_name:
-        user_name = st.text_input("Full Name", placeholder="e.g. Elon Musk")
+        user_name = st.text_input("Full Name", placeholder="e.g. Aishwarya Unnikrishnan")
     with col_email:
-        user_email = st.text_input("Email Address", placeholder="e.g. elon@musk.com")
+        user_email = st.text_input("Email Address", placeholder="e.g. aish@example.com")
 
     st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
     # ── File Uploader ──
     uploaded_file = st.file_uploader(
-        "Drop your resume here (PDF, DOC, DOCX)",
-        type=["pdf", "doc", "docx"],
+        "Drop your resume here (PDF, DOC, DOCX, PNG, JPG)",
+        type=["pdf", "doc", "docx", "png", "jpg", "jpeg", "webp", "bmp"],
     )
 
     if uploaded_file:
@@ -467,7 +467,7 @@ if page == "Upload & Analyze":
         <div style="text-align:center;padding:60px 20px;color:#334155">
           <div style="font-size:48px;margin-bottom:16px">📄</div>
           <div style="font-size:16px;font-weight:600;color:#475569">Upload your resume to get started</div>
-          <div style="font-size:14px;margin-top:8px">Fill in your name and email, then select a PDF, DOC, or DOCX file</div>
+          <div style="font-size:14px;margin-top:8px">Fill in your name and email, then select a PDF, DOC, DOCX, or image file</div>
         </div>
         """, unsafe_allow_html=True)
 

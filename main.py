@@ -1,17 +1,38 @@
 from datetime import datetime, timezone
 import re
+import io
+import zipfile
 import pdfplumber
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
+from PIL import Image
+from lxml import etree
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 import os
 from sqlalchemy import (
     create_engine, Column, Integer, String,
-    ForeignKey, Text, DateTime, Float, text
+    ForeignKey, Text, DateTime, Float
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from recomendation_service import (
     get_ai_recommendations,
     analyze_resume_ai
 )
+
+def extract_text_from_image(file_path: str) -> str:
+    try:
+        img = Image.open(file_path)
+
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        custom_config = r'--oem 3 --psm 3'
+        return pytesseract.image_to_string(img, config=custom_config)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image OCR failed: {str(e)}")
 
 # ---------------- DATABASE ---------------------------------
 
@@ -71,7 +92,158 @@ def get_db():
         db.close()
 
 
-# ---------------- ATS SCORE ----------------
+# ================================================================
+# TEXT EXTRACTION
+# ================================================================
+
+# Word processing XML namespace
+W_NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+
+
+def extract_text_from_pdf(file_path: str) -> str:
+    """Extract text from PDF using pdfplumber."""
+    extracted = ""
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    extracted += page_text + "\n"
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF extraction failed: {str(e)}")
+    return extracted
+
+
+def _pull_w_t_nodes(xml_bytes: bytes) -> list[str]:
+    """
+    Parse XML and return all <w:t> text values.
+    This catches paragraphs, text boxes, shapes, headers — everything.
+    """
+    try:
+        tree = etree.fromstring(xml_bytes)
+        return [t.text for t in tree.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t') if t.text]
+    except Exception:
+        return []
+
+
+def extract_text_from_docx_bytes(data: bytes) -> str:
+    """
+    Extract ALL text from a DOCX file (given as raw bytes) by reading
+    directly from the ZIP archive XML.
+
+    Covers:
+      - Normal paragraphs
+      - Text boxes and drawing shapes (wps:txbx, mc:AlternateContent)
+      - Table cells
+      - Headers and footers
+      - SmartArt fallback text
+
+    python-docx's .paragraphs only covers normal paragraphs and misses
+    everything inside text boxes, which most resume templates use heavily.
+    """
+    texts = []
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = z.namelist()
+
+            # Main document body
+            if 'word/document.xml' in names:
+                texts.extend(_pull_w_t_nodes(z.read('word/document.xml')))
+
+            # Headers and footers
+            for name in names:
+                if re.match(r'word/(header|footer)\d+\.xml', name):
+                    texts.extend(_pull_w_t_nodes(z.read(name)))
+
+    except zipfile.BadZipFile:
+        raise HTTPException(
+            status_code=400,
+            detail="The DOCX file appears to be corrupted or is not a valid DOCX file."
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DOCX extraction failed: {str(e)}")
+
+    result = " ".join(texts)
+
+    # Normalise whitespace
+    result = re.sub(r'[ \t]+', ' ', result)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
+
+
+def extract_text_from_docx(file_path: str) -> str:
+    """Read file from disk and delegate to byte-based extractor."""
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return extract_text_from_docx_bytes(data)
+
+
+def extract_text_from_doc(file_path: str) -> str:
+    """
+    Extract text from legacy .doc files.
+    Tries antiword first; falls back to raw printable-byte extraction.
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["antiword", file_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    except FileNotFoundError:
+        pass  # antiword not installed — fall through to raw extraction
+    except Exception:
+        pass
+
+    # Raw byte fallback: pull ASCII printable strings (length >= 4)
+    try:
+        with open(file_path, "rb") as f:
+            raw = f.read()
+        strings = re.findall(rb'[\x20-\x7E]{4,}', raw)
+        return "\n".join(s.decode("ascii", errors="ignore") for s in strings)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DOC extraction failed: {str(e)}")
+
+
+def extract_text_from_image(file_path: str) -> str:
+    """
+    Extract text from image files (PNG, JPG, JPEG, WEBP, BMP)
+    using Tesseract OCR.
+    """
+    try:
+        img = Image.open(file_path)
+
+        # Tesseract works best on RGB or grayscale
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        # oem 3 = LSTM engine, psm 3 = fully automatic page segmentation
+        custom_config = r'--oem 3 --psm 3'
+        return pytesseract.image_to_string(img, config=custom_config)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image OCR failed: {str(e)}")
+
+
+def extract_text(file_path: str, extension: str) -> str:
+    """Route to the correct extractor based on file extension."""
+    if extension == ".pdf":
+        return extract_text_from_pdf(file_path)
+    elif extension == ".docx":
+        return extract_text_from_docx(file_path)
+    elif extension == ".doc":
+        return extract_text_from_doc(file_path)
+    elif extension in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        return extract_text_from_image(file_path)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {extension}")
+
+
+# ================================================================
+# ATS SCORE
+# ================================================================
 
 def calculate_ats_score(resume_text: str, found_skills: list, missing_skills: list):
 
@@ -81,109 +253,83 @@ def calculate_ats_score(resume_text: str, found_skills: list, missing_skills: li
     # 1. Skills Score (30)
     total_skills = len(found_skills) + len(missing_skills)
     if total_skills:
-        skill_ratio = len(found_skills) / total_skills
-        score += round(skill_ratio * 30)
+        score += round((len(found_skills) / total_skills) * 30)
 
     # 2. Resume Sections (15)
-    sections = ["summary", "profile", "skills", "education", "experience", "projects", "certifications"]
-    section_count = sum(1 for section in sections if section in text_lower)
+    sections = ["summary", "profile", "skills", "education",
+                "experience", "projects", "certifications"]
+    section_count = sum(1 for s in sections if s in text_lower)
     score += round((section_count / len(sections)) * 15)
 
     # 3. Contact Information (10)
-    contact_score = 0
-    has_email = bool(re.search(r'[\w\.-]+@[\w\.-]+\.\w+', resume_text))
-    has_phone = bool(re.search(r'[\+\d][\d\s\-\(\)]{8,}', resume_text))
-    has_linkedin = "linkedin.com" in text_lower
-
-    if has_email:
-        contact_score += 4
-    if has_phone:
-        contact_score += 4
-    if has_linkedin:
-        contact_score += 2
-    score += contact_score
+    if re.search(r'[\w\.-]+@[\w\.-]+\.\w+', resume_text):
+        score += 4
+    if re.search(r'[\+\d][\d\s\-\(\)]{8,}', resume_text):
+        score += 4
+    if "linkedin.com" in text_lower:
+        score += 2
 
     # 4. Projects / Experience (15)
     project_keywords = [
         "project", "projects", "internship", "experience", "developed",
         "implemented", "created", "built", "designed", "dashboard", "api", "application"
     ]
-    project_hits = sum(1 for word in project_keywords if word in text_lower)
-    if project_hits >= 6:
-        score += 15
-    elif project_hits >= 4:
-        score += 12
-    elif project_hits >= 2:
-        score += 8
-    elif project_hits >= 1:
-        score += 4
+    project_hits = sum(1 for w in project_keywords if w in text_lower)
+    if project_hits >= 6:   score += 15
+    elif project_hits >= 4: score += 12
+    elif project_hits >= 2: score += 8
+    elif project_hits >= 1: score += 4
 
     # 5. Education (5)
-    education_keywords = ["bca", "bsc", "btech", "mca", "msc", "degree", "university", "college"]
-    if any(keyword in text_lower for keyword in education_keywords):
+    edu_keywords = ["bca", "bsc", "btech", "mca", "msc", "degree", "university", "college"]
+    if any(k in text_lower for k in edu_keywords):
         score += 5
 
     # 6. Achievements (10)
-    achievement_words = ["improved", "increased", "reduced", "optimized", "achieved", "boosted", "led", "managed"]
-    achievement_hits = sum(1 for word in achievement_words if word in text_lower)
-    percentage_hits = len(re.findall(r'\d+%', resume_text))
-    achievement_total = achievement_hits + percentage_hits
-
-    if achievement_total >= 5:
-        score += 10
-    elif achievement_total >= 3:
-        score += 7
-    elif achievement_total >= 1:
-        score += 4
+    achievement_words = ["improved", "increased", "reduced", "optimized",
+                         "achieved", "boosted", "led", "managed"]
+    a_hits = sum(1 for w in achievement_words if w in text_lower)
+    p_hits = len(re.findall(r'\d+%', resume_text))
+    total_a = a_hits + p_hits
+    if total_a >= 5:   score += 10
+    elif total_a >= 3: score += 7
+    elif total_a >= 1: score += 4
 
     # 7. Resume Length (5)
-    word_count = len(resume_text.split())
-    if 300 <= word_count <= 800:
-        score += 5
-    elif 200 <= word_count <= 1000:
-        score += 3
-    else:
-        score += 1
+    wc = len(resume_text.split())
+    if 300 <= wc <= 800:   score += 5
+    elif 200 <= wc <= 1000: score += 3
+    else:                   score += 1
 
     # 8. Formatting Quality (10)
-    formatting_score = 0
     lines = resume_text.splitlines()
-    if len(lines) >= 15:
-        formatting_score += 3
-    if ":" in resume_text:
-        formatting_score += 2
-    if "-" in resume_text or "•" in resume_text:
-        formatting_score += 3
-    if section_count >= 5:
-        formatting_score += 2
-    score += formatting_score
+    if len(lines) >= 15:          score += 3
+    if ":" in resume_text:        score += 2
+    if "-" in resume_text or "•" in resume_text: score += 3
+    if section_count >= 5:        score += 2
 
     score = min(score, 100)
 
-    if score >= 85:
-        status = "Excellent"
-    elif score >= 70:
-        status = "Good"
-    elif score >= 50:
-        status = "Average"
-    else:
-        status = "Poor"
+    if score >= 85:   status = "Excellent"
+    elif score >= 70: status = "Good"
+    elif score >= 50: status = "Average"
+    else:             status = "Poor"
 
     return score, status
 
 
-# ---------------- ANALYSIS ----------------
+# ================================================================
+# ANALYSIS
+# ================================================================
 
 def run_analysis(resume: Resume) -> dict:
 
-    # STEP 1: AI ROLE + SKILL DETECTION
     ai_result = analyze_resume_ai(resume.extracted_text)
 
     role = (ai_result.get("predicted_role") or "").strip()
-    found_skills = [s for s in ai_result.get("found_skills", []) if s]
+    found_skills   = [s for s in ai_result.get("found_skills",   []) if s]
     missing_skills = [s for s in ai_result.get("missing_skills", []) if s]
 
-    # STEP 2: NO ROLE FOUND
     if not role or role.lower() == "unknown":
         return {
             "predicted_role": "Unknown",
@@ -198,21 +344,15 @@ def run_analysis(resume: Resume) -> dict:
             "summary": "No role could be confidently predicted from this resume."
         }
 
-    # STEP 3: SCORE CALCULATION
-    total_skills = len(found_skills) + len(missing_skills)
+    total_skills     = len(found_skills) + len(missing_skills)
     role_match_score = round((len(found_skills) / total_skills) * 100, 2) if total_skills else 0.0
     ats_score, ats_status = calculate_ats_score(resume.extracted_text, found_skills, missing_skills)
 
-    # STRENGTHS
     strengths = []
-    if found_skills:
-        strengths.append(f"Matched {len(found_skills)} relevant skills")
-    if "%" in resume.extracted_text:
-        strengths.append("Contains quantified achievements")
-    if len(resume.extracted_text) > 800:
-        strengths.append("Detailed resume content")
+    if found_skills:                        strengths.append(f"Matched {len(found_skills)} relevant skills")
+    if "%" in resume.extracted_text:        strengths.append("Contains quantified achievements")
+    if len(resume.extracted_text) > 800:    strengths.append("Detailed resume content")
 
-    # IMPROVEMENTS
     improvements = []
     if missing_skills:
         improvements.append(f"Add missing skills: {', '.join(missing_skills)}")
@@ -221,8 +361,9 @@ def run_analysis(resume: Resume) -> dict:
     if len(resume.extracted_text) < 500:
         improvements.append("Add more project and work experience details")
 
-    # AI RECOMMENDATIONS
-    recommendations = get_ai_recommendations(role, role_match_score, found_skills, missing_skills)
+    recommendations = get_ai_recommendations(
+        role, role_match_score, found_skills, missing_skills
+    )
 
     summary = (
         f"This resume matches {role_match_score}% of the required {role} skills. "
@@ -231,20 +372,22 @@ def run_analysis(resume: Resume) -> dict:
     )
 
     return {
-        "predicted_role": role,
-        "ats_score": ats_score,
-        "ats_status": ats_status,
+        "predicted_role":  role,
+        "ats_score":       ats_score,
+        "ats_status":      ats_status,
         "role_match_score": role_match_score,
-        "found_skills": found_skills,
-        "missing_skills": missing_skills,
-        "strengths": strengths,
-        "improvements": improvements,
+        "found_skills":    found_skills,
+        "missing_skills":  missing_skills,
+        "strengths":       strengths,
+        "improvements":    improvements,
         "recommendations": recommendations,
-        "summary": summary,
+        "summary":         summary,
     }
 
 
-# ---------------- ROUTES ----------------
+# ================================================================
+# ROUTES
+# ================================================================
 
 @app.get("/")
 def first_start():
@@ -258,41 +401,52 @@ async def upload_resume(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    allowed_extensions = [".pdf", ".doc", ".docx", ".png"]
+    ALLOWED = [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".bmp"]
     extension = os.path.splitext(file.filename)[1].lower()
 
-    if extension not in allowed_extensions:
+    if extension not in ALLOWED:
         raise HTTPException(
             status_code=400,
-            detail="Only PDF, DOC, DOCX and PNG files are allowed"
+            detail=f"Unsupported file type '{extension}'. Allowed: {', '.join(ALLOWED)}"
         )
 
+   # Save to disk
     file_path = os.path.join(UPLOAD_DIR, os.path.basename(file.filename))
     content = await file.read()
+
+# File size validation (5 MB)
+    MAX_FILE_SIZE = 5 * 1024 * 1024
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+        status_code=400,
+        detail="File size exceeds 5MB limit"
+    )
 
     with open(file_path, "wb") as buffer:
         buffer.write(content)
 
-    # Extract text
-    extracted_text = ""
-    if extension == ".pdf":
-        try:
-            with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        extracted_text += page_text + "\n"
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"PDF extraction failed: {str(e)}")
+    # Extract text — for DOCX pass raw bytes directly (avoids re-read issues)
+    if extension == ".docx":
+        extracted_text = extract_text_from_docx_bytes(content)
+    else:
+        extracted_text = extract_text(file_path, extension)
+
+    print("========== EXTRACTED TEXT ==========")
+    print(f"Length: {len(extracted_text)} chars")
+    print(extracted_text[:3000])
+    print("====================================")
 
     if not extracted_text.strip():
         raise HTTPException(
             status_code=400,
-            detail="Could not extract text from the file."
+            detail=(
+                "Could not extract any text from the file. "
+                "For DOCX: ensure it's a real Word document, not renamed. "
+                "For images: ensure text is clearly visible and not handwritten. "
+                "Try converting to PDF for best results."
+            )
         )
-
-    print("========== EXTRACTED TEXT ==========")
-    print(extracted_text[:3000])
 
     # Upsert user
     user = db.query(User).filter(User.email == email).first()
@@ -302,7 +456,7 @@ async def upload_resume(
         db.commit()
         db.refresh(user)
 
-    # Save resume
+    # Save resume record
     resume = Resume(user_id=user.id, file_name=file.filename, extracted_text=extracted_text)
     db.add(resume)
     db.commit()
@@ -323,11 +477,7 @@ async def upload_resume(
     db.add(analysis)
     db.commit()
 
-    return {
-        "resume_id": resume.id,
-        "filename": file.filename,
-        **result,
-    }
+    return {"resume_id": resume.id, "filename": file.filename, **result}
 
 
 @app.get("/analysis-history")
