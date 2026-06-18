@@ -7,6 +7,8 @@ import pytesseract
 pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
+from datetime import datetime
+import pytz
 from PIL import Image
 from lxml import etree
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
@@ -43,15 +45,18 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # ---------------- TABLES ----------------
-
+IST = pytz.timezone("Asia/Kolkata")
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100))
     email = Column(String(255), unique=True, index=True)
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(IST)
+    )
 
 class Resume(Base):
     __tablename__ = "resumes"
@@ -60,7 +65,7 @@ class Resume(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     file_name = Column(String(255))
     extracted_text = Column(Text)
-    uploaded_at = Column(DateTime, default=datetime.now(timezone.utc))
+    uploaded_at = Column(DateTime, default=lambda: datetime.now(IST))
 
 
 class AnalysisResult(Base):
@@ -73,7 +78,7 @@ class AnalysisResult(Base):
     missing_skills = Column(Text)
     strengths = Column(Text)
     recommendations = Column(Text)
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(IST))
 
 
 Base.metadata.create_all(bind=engine)

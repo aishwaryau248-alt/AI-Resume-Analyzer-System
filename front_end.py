@@ -286,9 +286,9 @@ if page == "Upload & Analyze":
     # ── User Info Fields ──
     col_name, col_email = st.columns(2)
     with col_name:
-        user_name = st.text_input("Full Name", placeholder="e.g. Aishwarya Unnikrishnan")
+        user_name = st.text_input("Full Name", placeholder="e.g. elon musk")
     with col_email:
-        user_email = st.text_input("Email Address", placeholder="e.g. aish@example.com")
+        user_email = st.text_input("Email Address", placeholder="e.g. elon@musk.com")
 
     st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
