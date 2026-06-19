@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-AI Resume Analyzer System is a full-stack web application that helps job seekers evaluate their resumes against industry-standard job roles using Artificial Intelligence and NLP techniques.
+AI Resume Analyzer System is a full-stack web application that helps job seekers evaluate their resumes against industry-standard job roles using Artificial Intelligence, OCR, and NLP techniques.
 
-The system allows users to upload resumes, extract resume text, identify technical skills, calculate role match scores, detect missing skills, and generate AI-powered recommendations.
+The system allows users to register/login, upload resumes (PDF, DOC, DOCX, or image), extract resume text, detect the most likely job role, identify technical skills, calculate ATS and role-match scores, detect missing skills, and generate AI-powered recommendations. An AGENT role has full visibility across all users, resumes, and analysis history.
 
-The application uses FastAPI for backend development, Streamlit for the frontend dashboard, SQLAlchemy ORM for database operations, and Hugging Face Inference API for intelligent career guidance.
+The application uses FastAPI for backend development, Streamlit for the frontend dashboard, SQLAlchemy ORM (MySQL) for database operations, JWT-based authentication, and Hugging Face's Mistral-7B-Instruct model for AI-driven career guidance.
 
 ---
 
@@ -14,62 +14,79 @@ The application uses FastAPI for backend development, Streamlit for the frontend
 
 Recruiters receive thousands of resumes for every job opening. Manual resume screening is time-consuming and often inconsistent.
 
-This project automates the resume evaluation process by analyzing candidate skills, comparing them against job role requirements, and providing actionable recommendations to improve employability.
+This project automates the resume evaluation process by extracting resume content from multiple file formats, detecting the candidate's likely role, comparing their skills against role requirements, scoring the resume for ATS-friendliness, and providing actionable AI-generated recommendations to improve employability.
 
 ---
 
 ## Objectives
 
-* Upload resumes in PDF, DOC, and DOCX formats
-* Extract text from resumes
-* Identify technical skills
-* Match resumes with target job roles
-* Calculate resume scores
-* Detect missing skills
+* Register and authenticate users with JWT + OTP email verification
+* Upload resumes in PDF, DOC, DOCX, and image (PNG/JPG/JPEG/WEBP/BMP) formats
+* Extract text from resumes (including OCR for images)
+* Detect the candidate's most likely job role
+* Identify technical skills and missing skills
+* Calculate ATS score and role-match score
 * Generate AI-based recommendations
-* Store analysis history
-* Visualize results through an interactive dashboard
+* Store per-user analysis history
+* Provide an AGENT dashboard with full visibility across all users/resumes
+* Visualize results through an interactive Streamlit dashboard
 
 ---
 
 ## Features
 
+### Authentication
+
+* User registration with OTP email verification
+* JWT-based login
+* Forgot password / reset password flow
+* Role-based access control (`USER` vs `AGENT`)
+
 ### Resume Upload
 
 * Upload PDF resumes
 * Upload DOC resumes
-* Upload DOCX resumes
-* Automatic text extraction
-* File validation
+* Upload DOCX resumes (parsed directly via ZIP/XML, including headers/footers and text boxes)
+* Upload image resumes (PNG, JPG, JPEG, WEBP, BMP) via Tesseract OCR
+* File type and 5 MB size validation
+* Empty-text detection and rejection
 
 ### Resume Analysis
 
-* Skill extraction
-* Missing skill identification
-* Resume score calculation
-* Role matching
+* AI-driven role prediction
+* Skill extraction (found vs. missing)
+* ATS score calculation (rule-based, multi-factor)
+* Role-match score calculation
+* Strengths and improvement suggestions
 
 ### AI Features
 
-* AI-powered recommendations
-* Career guidance
-* Skill improvement suggestions
-* Certification recommendations
+* AI-powered recommendations via Hugging Face's `mistralai/Mistral-7B-Instruct-v0.3`
+* Role-specific fallback content (certifications, projects, roadmap) for 20 curated roles
+* Career guidance and skill-improvement suggestions
 
-### Dashboard Features
+### Dashboard Features (USER)
 
-* Resume upload interface
-* Analysis dashboard
-* History tracking
-* Score visualization
-* Resume management
+* Resume upload & analysis interface
+* ATS score ring and role-match visualization
+* Tabbed results: Skills / Strengths & Improvements / AI Recommendations
+* Personal analysis history with score trend chart
+
+### Dashboard Features (AGENT)
+
+* View all registered users
+* View all uploaded resumes (with role, ATS score, role-match score)
+* Search resumes by predicted role
+* Download any user's original resume file
+* View all analysis results across all users
+* Recommendation viewer per analysis
 
 ### Database Features
 
-* Resume storage
-* Analysis result storage
-* User information storage
-* Historical analysis tracking
+* User storage with verification/reset tokens
+* Resume storage with extracted text and file path
+* Analysis result storage (role, score, ATS score/status, skills, recommendations)
+* Per-user and global historical analysis tracking
 
 ---
 
@@ -81,32 +98,36 @@ This project automates the resume evaluation process by analyzing candidate skil
 * FastAPI
 * SQLAlchemy ORM
 * Pydantic
+* python-jose (JWT)
+* passlib + bcrypt (password hashing)
 
 ### Frontend
 
 * Streamlit
 
 ### Database
-* MySQL 
+
+* MySQL (via PyMySQL)
 
 ### AI / NLP
 
 * Hugging Face Inference API
-* Qwen2.5-7B-Instruct
-* NLP Keyword Matching
+* `mistralai/Mistral-7B-Instruct-v0.3`
+* Rule-based NLP keyword/regex matching for skills and ATS scoring
+* ESCO CSV dataset + curated 20-role mapping for role detection
 
-### Libraries
+### Text Extraction Libraries
 
-* pdfplumber
-* pandas
-* requests
-* python-dotenv
-* passlib
-* jose
+* pdfplumber (PDF)
+* lxml (DOCX — direct ZIP/XML parsing)
+* pytesseract + Pillow (image OCR)
+* antiword (legacy `.doc`, with raw-byte fallback)
+
+### Other Libraries
+
+* pandas, requests, python-dotenv, pytz
 
 ---
-
-## System Architecture
 
 ## System Architecture
 
@@ -124,23 +145,24 @@ This project automates the resume evaluation process by analyzing candidate skil
                          v
                 +------------------+
                 | FastAPI Backend  |
+                | (Auth + Main)    |
                 +--------+---------+
                          |
-      +------------------+------------------+
-      |                  |                  |
-      v                  v                  v
-+-------------+  +--------------+  +------------------+
-| Resume      |  | Skill        |  | AI Recommendation|
-| Upload      |  | Matching     |  | Module           |
-| Module      |  | Module       |  | (Hugging Face)   |
-+-------------+  +--------------+  +------------------+
+      +------------------+------------------+------------------+
+      |                  |                  |                  |
+      v                  v                  v                  v
++-------------+  +--------------+  +------------------+  +-------------+
+| Resume      |  | Role/Skill   |  | AI Recommendation|  | Auth Module |
+| Upload &    |  | Detection &  |  | Module            |  | (JWT, OTP,  |
+| Extraction  |  | ATS Scoring  |  | (Hugging Face)    |  | Role-based) |
+| Module      |  | Module       |  |                   |  |             |
++-------------+  +--------------+  +------------------+  +-------------+
                          |
                          v
                 +------------------+
                 | MySQL Database   |
                 +------------------+
 ```
-## Project Structure
 
 ## Project Structure
 
@@ -148,22 +170,13 @@ This project automates the resume evaluation process by analyzing candidate skil
 resume_ai_system/
 │
 ├── backend/
-│   ├── routes/
-│   ├── models/
-│   ├── schemas/
-│   ├── services/
-│   ├── database/
-│   └── new.py
+│   ├── main.py                  # FastAPI app, routes, extraction, ATS scoring
+│   ├── auth.py                  # Models, JWT auth, OTP, password reset
+│   ├── recomendation_service.py # AI role detection + recommendations
+│   └── uploads/                 # Stored original resume files
 │
 ├── frontend/
-│   └── ui.py
-│
-├── ml/
-│   ├── skill_extractor/
-│   ├── matching/
-│   └── scoring/
-│
-├── uploads/
+│   └── app.py                   # Streamlit dashboard (Auth/User/Agent views)
 │
 ├── requirements.txt
 ├── README.md
@@ -175,16 +188,21 @@ resume_ai_system/
 
 ### Database Name
 
-resume_ai_db
+`resume_ai_db`
 
 ### Users Table
 
-| Column     | Type     |
-| ---------- | -------- |
-| id         | Integer  |
-| name       | String   |
-| email      | String   |
-| created_at | DateTime |
+| Column           | Type     |
+| ---------------- | -------- |
+| id                | Integer  |
+| name              | String   |
+| email             | String   |
+| password_hash     | String   |
+| role              | String   |
+| is_verified       | Boolean  |
+| reset_token       | String   |
+| verification_otp  | String   |
+| created_at        | DateTime |
 
 ### Resumes Table
 
@@ -193,6 +211,7 @@ resume_ai_db
 | id             | Integer  |
 | user_id        | Integer  |
 | file_name      | String   |
+| file_path      | String   |
 | extracted_text | Text     |
 | uploaded_at    | DateTime |
 
@@ -204,6 +223,8 @@ resume_ai_db
 | resume_id       | Integer  |
 | role            | String   |
 | score           | Float    |
+| ats_score       | Float    |
+| ats_status      | String   |
 | missing_skills  | Text     |
 | strengths       | Text     |
 | recommendations | Text     |
@@ -215,37 +236,55 @@ resume_ai_db
 
 ### Step 1: Clone Repository
 
+```
 git clone https://github.com/yourusername/resume-ai-system.git
-
 cd resume-ai-system
+```
 
 ### Step 2: Create Virtual Environment
 
 Windows
-
+```
 python -m venv venv
-
 venv\Scripts\activate
+```
 
 Linux / Mac
-
+```
 python3 -m venv venv
-
 source venv/bin/activate
+```
 
 ### Step 3: Install Dependencies
 
+```
 pip install -r requirements.txt
+```
+
+### Step 4: Install Tesseract OCR (required for image resumes)
+
+Windows: install Tesseract and ensure the path in `main.py` (`pytesseract.pytesseract.tesseract_cmd`) matches your install location.
+
+Linux:
+```
+sudo apt-get install tesseract-ocr
+```
+
+### Step 5 (Optional): Install antiword for legacy `.doc` extraction
+
+If `antiword` is not available, `.doc` files fall back to a raw-byte text scan.
 
 ---
 
 ## Environment Variables
 
-Create a .env file:
+Create a `.env` file:
 
+```
 HF_API_KEY=your_huggingface_api_key
-
-DATABASE_URL=postgresql+psycopg2://username:password@localhost/resume_ai_db
+DATABASE_URL=mysql+pymysql://root:1234@localhost/resume_ai_db
+SECRET_KEY=your_secret_key_here
+```
 
 ---
 
@@ -253,9 +292,11 @@ DATABASE_URL=postgresql+psycopg2://username:password@localhost/resume_ai_db
 
 Create Database:
 
+```sql
 CREATE DATABASE resume_ai_db;
+```
 
-Run application and SQLAlchemy will automatically create tables.
+Run the application and SQLAlchemy will automatically create the `users`, `resumes`, and `analysis_results` tables.
 
 ---
 
@@ -263,145 +304,138 @@ Run application and SQLAlchemy will automatically create tables.
 
 Start FastAPI Server
 
+```
 uvicorn main:app --reload
+```
 
-Server URL
+Server URL: `http://localhost:8000`
 
-http://localhost:8000
+Swagger Documentation: `http://localhost:8000/docs`
 
-Swagger Documentation
-
-http://localhost:8000/docs
-
-ReDoc Documentation
-
-http://localhost:8000/redoc
+ReDoc Documentation: `http://localhost:8000/redoc`
 
 ---
 
 ## API Endpoints
 
-### Upload Resume
+### Auth
 
-POST /upload-resume
+| Method | Endpoint                     | Description                          |
+| ------ | ----------------------------- | ------------------------------------ |
+| POST   | `/register`                   | Register a new user, returns OTP     |
+| GET    | `/verify-email/{otp}`         | Verify account using OTP              |
+| POST   | `/login`                      | Login, returns JWT access token       |
+| POST   | `/forgot-password`            | Generate password reset token          |
+| POST   | `/reset-password`             | Reset password using token             |
+| GET    | `/me`                         | Get current authenticated user info   |
 
-Description:
+### User (requires login)
 
-Uploads resume and extracts text.
+| Method | Endpoint               | Description                                   |
+| ------ | ----------------------- | ---------------------------------------------- |
+| POST   | `/upload-resume`        | Upload resume, extract text, run full analysis |
+| GET    | `/my-history`           | Get the logged-in user's analysis history       |
+| GET    | `/my-resumes`           | Get the logged-in user's uploaded resumes        |
+| GET    | `/resume/{resume_id}`   | Get a resume's details (own resume, or any if AGENT) |
+| DELETE | `/resume/{resume_id}`   | Delete own resume (or any if AGENT)              |
 
----
+### Agent-only (requires AGENT role)
 
-### Analyze Resume
-
-POST /analyze/{resume_id}
-
-Description:
-
-Analyzes resume against selected role.
-
----
-
-### Get Resume Details
-
-GET /resume/{resume_id}
-
-Description:
-
-Returns uploaded resume details.
-
----
-
-### Analysis History
-
-GET /analysis-history
-
-Description:
-
-Returns all analysis records.
-
----
-
-### Delete Resume
-
-DELETE /resume/{resume_id}
-
-Description:
-
-Deletes resume permanently.
+| Method | Endpoint                       | Description                                  |
+| ------ | -------------------------------- | --------------------------------------------- |
+| GET    | `/agent/users`                   | View all registered users                      |
+| GET    | `/agent/resumes`                 | View every uploaded resume with analysis data   |
+| GET    | `/agent/search-role`             | Search resumes by predicted role                |
+| GET    | `/agent/analysis-history`        | View all analysis results across all users       |
+| GET    | `/agent/download/{resume_id}`    | Download a resume's original file               |
 
 ---
 
 ## Streamlit Execution Steps
 
 Navigate to frontend folder
-
+```
 cd frontend
+```
 
 Run Streamlit
-
+```
 streamlit run app.py
+```
 
-Open Browser
-
-http://localhost:8501
+Open Browser: `http://localhost:8501`
 
 ---
 
 ## Dashboard Modules
 
-### Upload Resume
+### Auth
 
-* Upload files
-* Extract text
-* Save resume
+* Login
+* Register with OTP verification
+* Forgot / reset password
 
-### Analyze Resume
+### Upload & Analyze (USER + AGENT)
 
-* Select role
-* Calculate score
-* Display skills
-* Generate recommendations
+* Upload resume file
+* View detected role, ATS score, role-match score
+* View found/missing skills, strengths, improvements
+* View AI-generated recommendations
 
-### Analysis History
+### My History (USER + AGENT)
 
-* View previous analyses
-* Track scores
-* Visualize trends
+* View own past analyses
+* Score trend chart
+* Average/best score metrics
 
-### Resume Management
+### Agent Dashboard (AGENT only)
 
-* Fetch resume
-* View details
-* Delete resume
+* All registered users
+* All uploaded resumes (with search by role, download original file)
+* All analysis results with recommendations, across all users
 
 ---
 
 ## AI / NLP Techniques Used
 
+### Role Detection
+
+Role prediction is performed by the AI recommendation service, using ESCO CSV data as the primary role source alongside a curated 20-role mapping, with title-extraction from resume headers as an additional signal.
+
 ### Skill Extraction
 
-The system uses keyword-based NLP matching to identify skills from extracted resume text.
+Regex word-boundary keyword matching identifies found and missing skills against the detected role's skill list.
 
 ### Resume Scoring
 
-Score Formula:
+```
+Role Match Score = (Found Skills / Total Required Skills) × 100
+```
 
-Match Score = (Detected Skills / Required Skills) × 100
+### ATS Score
 
-### Job Matching
+A weighted, rule-based score (0–100) combining:
 
-Compares resume skills against role-specific skill requirements.
+* Skill match ratio (up to 30 pts)
+* Resume section coverage — summary, skills, education, experience, projects, certifications (up to 15 pts)
+* Contact info presence — email, phone, LinkedIn (up to 10 pts)
+* Project/experience keyword density (up to 15 pts)
+* Education keywords (5 pts)
+* Quantified achievements — % figures, action verbs (up to 10 pts)
+* Word count / structure / formatting signals (up to remaining pts)
+
+Status bands: Excellent (≥85), Good (≥70), Average (≥50), Poor (<50)
 
 ### AI Recommendations
 
-Uses Hugging Face Inference API with Qwen2.5-7B-Instruct model to generate:
+Uses Hugging Face Inference API with `mistralai/Mistral-7B-Instruct-v0.3` to generate role-specific:
 
-* Strengths
-* Weaknesses
-* Missing skills
 * Certifications
 * Project suggestions
-* Career advice
+* Career roadmap
+* Strength/weakness-aware advice
+
+Falls back to curated role-specific content for 20 mapped roles if the AI call fails.
 
 ---
 
@@ -409,20 +443,19 @@ Uses Hugging Face Inference API with Qwen2.5-7B-Instruct model to generate:
 
 ### File Validation
 
-* Accepts PDF
-* Accepts DOC
-* Accepts DOCX
-* Rejects unsupported files
+* Accepts PDF, DOC, DOCX, PNG, JPG, JPEG, WEBP, BMP
+* Rejects unsupported file types
+* Rejects files over 5 MB
 
 ### User Validation
 
-* Email validation
-* Duplicate prevention
+* Email format and duplicate-account prevention
+* Email verification via OTP before login is allowed
 
 ### Resume Validation
 
-* Empty text detection
-* Missing resume handling
+* Empty/unreadable extracted text detection
+* Missing resume handling on lookups
 
 ---
 
@@ -430,13 +463,14 @@ Uses Hugging Face Inference API with Qwen2.5-7B-Instruct model to generate:
 
 Handles:
 
-* Invalid file uploads
-* Unsupported formats
-* Missing resumes
-* Database failures
-* API failures
+* Invalid or unsupported file uploads
+* Corrupted DOCX files
 * Empty extracted text
-* Hugging Face API exceptions
+* Missing resumes/users
+* Invalid or expired JWT tokens
+* Invalid OTP / reset tokens
+* Database failures
+* Hugging Face API exceptions / failures (falls back to curated recommendations)
 
 ---
 
@@ -444,75 +478,71 @@ Handles:
 
 ### Core Features
 
-✔ Resume Upload
+✔ User Registration & OTP Email Verification
 
-✔ Resume Text Extraction
+✔ JWT Authentication & Role-Based Access (USER / AGENT)
 
-✔ Resume Analysis
+✔ Resume Upload (PDF, DOC, DOCX, Image)
 
-✔ Role Matching
+✔ Multi-format Text Extraction (incl. OCR)
 
-✔ Skill Detection
+✔ AI Role Detection
 
-✔ Resume Score Calculation
+✔ Skill Detection (Found / Missing)
 
-✔ Missing Skill Detection
+✔ ATS Score Calculation
 
-✔ AI Recommendations
+✔ Role Match Score Calculation
 
-✔ Analysis History
+✔ AI Recommendations (with fallback content)
 
-✔ Resume Management
+✔ Per-user Analysis History
 
-✔ Interactive Dashboard
+✔ Agent Dashboard (Users / Resumes / Analyses / Downloads)
+
+✔ Interactive Streamlit Dashboard
 
 ---
+
+## Challenges Solved
 
 ### Resume Parsing
 
-Different resume formats resulted in inconsistent text extraction.
+Different resume formats (PDF, DOC, DOCX, images) resulted in inconsistent text extraction — solved with format-specific extractors, including direct ZIP/XML parsing for DOCX (to capture text boxes) and Tesseract OCR for images.
 
 ### Skill Matching
 
-Skills were represented in multiple formats and abbreviations.
+Skills were represented in multiple formats and abbreviations — addressed with regex word-boundary matching and normalization.
 
 ### AI API Integration
 
-Handling rate limits and external API failures.
+Handling Hugging Face rate limits and API failures — solved with try/except fallbacks to curated role-specific recommendation content.
 
 ### Database Relationships
 
-Maintaining relationships between resumes and analysis results.
+Maintaining relationships between users, resumes, and analysis results via foreign keys and outer joins (so unanalyzed resumes are never hidden from agents).
 
-### Error Handling
+### Access Control
 
-Managing invalid uploads and missing records.
+Ensuring users can only view/delete their own resumes while agents retain full visibility, enforced via FastAPI dependencies (`get_current_user`, `require_agent`).
 
 ---
-## Demo Video
-
-🎥 Watch the complete project demo:
-
-https://youtu.be/_GgahmbFf8U?si=zvNywNSqZfRCfyC5
 
 ## Future Enhancements
 
-* JWT Authentication
-* User Login System
 * Resume Ranking System
 * Multi-Role Comparison
-* TF-IDF Similarity Matching
-* BERT Embedding Similarity
-* ATS Resume Score
+* TF-IDF / BERT Embedding Similarity Matching
 * PDF Report Generation
-* Email Notifications
-* Admin Dashboard
+* Email Notifications (real OTP delivery instead of in-response OTP)
+* Refresh tokens / token revocation
+* Admin analytics dashboard
 
 ---
 
 ## Conclusion
 
-The AI Resume Analyzer System successfully automates resume evaluation by combining NLP techniques, AI-generated recommendations, role-based matching, and database-driven history tracking. The project demonstrates practical implementation of FastAPI, Streamlit, SQLAlchemy, and external AI services in solving real-world recruitment challenges.
+The AI Resume Analyzer System automates resume evaluation by combining multi-format text extraction (including OCR), AI-driven role detection, rule-based ATS scoring, AI-generated recommendations, JWT-secured role-based access, and database-driven history tracking. The project demonstrates practical implementation of FastAPI, Streamlit, SQLAlchemy, JWT authentication, and external AI services in solving real-world recruitment screening challenges.
 
 ---
 
