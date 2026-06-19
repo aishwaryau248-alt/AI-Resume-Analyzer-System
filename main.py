@@ -1,112 +1,49 @@
-from datetime import datetime, timezone
-import re
 import io
+import os
+import re
 import zipfile
+from datetime import datetime
+from fastapi.responses import FileResponse
 import pdfplumber
+import pytz
 import pytesseract
+from PIL import Image
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from lxml import etree
+from sqlalchemy.orm import Session
+
+from auth import (
+    AnalysisResult,
+    Resume,
+    User,
+    get_current_user,
+    get_db,
+    hash_password,
+    require_agent,
+    router as auth_router,
+)
+from recomendation_service import analyze_resume_ai, get_ai_recommendations
+
+# ── Windows: Tesseract binary path ───────────────────────────────────────────
 pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
-from datetime import datetime
-import pytz
-from PIL import Image
-from lxml import etree
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
-import os
-from sqlalchemy import (
-    create_engine, Column, Integer, String,
-    ForeignKey, Text, DateTime, Float
-)
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from recomendation_service import (
-    get_ai_recommendations,
-    analyze_resume_ai
-)
 
-def extract_text_from_image(file_path: str) -> str:
-    try:
-        img = Image.open(file_path)
-
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-
-        custom_config = r'--oem 3 --psm 3'
-        return pytesseract.image_to_string(img, config=custom_config)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Image OCR failed: {str(e)}")
-
-# ---------------- DATABASE ---------------------------------
-
-DATABASE_URL = "mysql+pymysql://root:1234@localhost/resume_ai_db"
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# ---------------- TABLES ----------------
 IST = pytz.timezone("Asia/Kolkata")
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100))
-    email = Column(String(255), unique=True, index=True)
-
-    created_at = Column(
-        DateTime,
-        default=lambda: datetime.now(IST)
-    )
-
-class Resume(Base):
-    __tablename__ = "resumes"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    file_name = Column(String(255))
-    extracted_text = Column(Text)
-    uploaded_at = Column(DateTime, default=lambda: datetime.now(IST))
-
-
-class AnalysisResult(Base):
-    __tablename__ = "analysis_results"
-
-    id = Column(Integer, primary_key=True, index=True)
-    resume_id = Column(Integer, ForeignKey("resumes.id"))
-    role = Column(String(100))
-    score = Column(Float)
-    missing_skills = Column(Text)
-    strengths = Column(Text)
-    recommendations = Column(Text)
-    created_at = Column(DateTime, default=lambda: datetime.now(IST))
-
-
-Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+app.include_router(auth_router)   # mounts /register /login /verify-email /me etc.
 
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR   = "uploads"
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # ================================================================
 # TEXT EXTRACTION
 # ================================================================
 
-# Word processing XML namespace
-W_NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-
-
 def extract_text_from_pdf(file_path: str) -> str:
-    """Extract text from PDF using pdfplumber."""
     extracted = ""
     try:
         with pdfplumber.open(file_path) as pdf:
@@ -115,129 +52,76 @@ def extract_text_from_pdf(file_path: str) -> str:
                 if page_text:
                     extracted += page_text + "\n"
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"PDF extraction failed: {e}")
     return extracted
 
 
-def _pull_w_t_nodes(xml_bytes: bytes) -> list[str]:
-    """
-    Parse XML and return all <w:t> text values.
-    This catches paragraphs, text boxes, shapes, headers — everything.
-    """
+def _pull_w_t_nodes(xml_bytes: bytes) -> list:
     try:
         tree = etree.fromstring(xml_bytes)
-        return [t.text for t in tree.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t') if t.text]
+        W    = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        return [t.text for t in tree.iter(f"{{{W}}}t") if t.text]
     except Exception:
         return []
 
 
 def extract_text_from_docx_bytes(data: bytes) -> str:
-    """
-    Extract ALL text from a DOCX file (given as raw bytes) by reading
-    directly from the ZIP archive XML.
-
-    Covers:
-      - Normal paragraphs
-      - Text boxes and drawing shapes (wps:txbx, mc:AlternateContent)
-      - Table cells
-      - Headers and footers
-      - SmartArt fallback text
-
-    python-docx's .paragraphs only covers normal paragraphs and misses
-    everything inside text boxes, which most resume templates use heavily.
-    """
     texts = []
-
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             names = z.namelist()
-
-            # Main document body
-            if 'word/document.xml' in names:
-                texts.extend(_pull_w_t_nodes(z.read('word/document.xml')))
-
-            # Headers and footers
+            if "word/document.xml" in names:
+                texts.extend(_pull_w_t_nodes(z.read("word/document.xml")))
             for name in names:
-                if re.match(r'word/(header|footer)\d+\.xml', name):
+                if re.match(r"word/(header|footer)\d+\.xml", name):
                     texts.extend(_pull_w_t_nodes(z.read(name)))
-
     except zipfile.BadZipFile:
-        raise HTTPException(
-            status_code=400,
-            detail="The DOCX file appears to be corrupted or is not a valid DOCX file."
-        )
+        raise HTTPException(status_code=400, detail="Corrupted or invalid DOCX file.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DOCX extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"DOCX extraction failed: {e}")
 
     result = " ".join(texts)
-
-    # Normalise whitespace
-    result = re.sub(r'[ \t]+', ' ', result)
-    result = re.sub(r'\n{3,}', '\n\n', result)
+    result = re.sub(r"[ \t]+", " ", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
 
-def extract_text_from_docx(file_path: str) -> str:
-    """Read file from disk and delegate to byte-based extractor."""
-    with open(file_path, "rb") as f:
-        data = f.read()
-    return extract_text_from_docx_bytes(data)
-
-
 def extract_text_from_doc(file_path: str) -> str:
-    """
-    Extract text from legacy .doc files.
-    Tries antiword first; falls back to raw printable-byte extraction.
-    """
     try:
         import subprocess
-        result = subprocess.run(
-            ["antiword", file_path],
-            capture_output=True, text=True, timeout=30
+        res = subprocess.run(
+            ["antiword", file_path], capture_output=True, text=True, timeout=30
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout
-    except FileNotFoundError:
-        pass  # antiword not installed — fall through to raw extraction
-    except Exception:
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout
+    except (FileNotFoundError, Exception):
         pass
 
-    # Raw byte fallback: pull ASCII printable strings (length >= 4)
     try:
         with open(file_path, "rb") as f:
             raw = f.read()
-        strings = re.findall(rb'[\x20-\x7E]{4,}', raw)
+        strings = re.findall(rb"[\x20-\x7E]{4,}", raw)
         return "\n".join(s.decode("ascii", errors="ignore") for s in strings)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DOC extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"DOC extraction failed: {e}")
 
 
 def extract_text_from_image(file_path: str) -> str:
-    """
-    Extract text from image files (PNG, JPG, JPEG, WEBP, BMP)
-    using Tesseract OCR.
-    """
     try:
         img = Image.open(file_path)
-
-        # Tesseract works best on RGB or grayscale
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
-
-        # oem 3 = LSTM engine, psm 3 = fully automatic page segmentation
-        custom_config = r'--oem 3 --psm 3'
-        return pytesseract.image_to_string(img, config=custom_config)
-
+        return pytesseract.image_to_string(img, config=r"--oem 3 --psm 3")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Image OCR failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Image OCR failed: {e}")
 
 
 def extract_text(file_path: str, extension: str) -> str:
-    """Route to the correct extractor based on file extension."""
     if extension == ".pdf":
         return extract_text_from_pdf(file_path)
     elif extension == ".docx":
-        return extract_text_from_docx(file_path)
+        with open(file_path, "rb") as f:
+            return extract_text_from_docx_bytes(f.read())
     elif extension == ".doc":
         return extract_text_from_doc(file_path)
     elif extension in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
@@ -251,33 +135,26 @@ def extract_text(file_path: str, extension: str) -> str:
 # ================================================================
 
 def calculate_ats_score(resume_text: str, found_skills: list, missing_skills: list):
-
     text_lower = resume_text.lower()
     score = 0
 
-    # 1. Skills Score (30)
     total_skills = len(found_skills) + len(missing_skills)
     if total_skills:
         score += round((len(found_skills) / total_skills) * 30)
 
-    # 2. Resume Sections (15)
     sections = ["summary", "profile", "skills", "education",
                 "experience", "projects", "certifications"]
     section_count = sum(1 for s in sections if s in text_lower)
     score += round((section_count / len(sections)) * 15)
 
-    # 3. Contact Information (10)
-    if re.search(r'[\w\.-]+@[\w\.-]+\.\w+', resume_text):
-        score += 4
-    if re.search(r'[\+\d][\d\s\-\(\)]{8,}', resume_text):
-        score += 4
-    if "linkedin.com" in text_lower:
-        score += 2
+    if re.search(r"[\w\.-]+@[\w\.-]+\.\w+", resume_text): score += 4
+    if re.search(r"[\+\d][\d\s\-\(\)]{8,}", resume_text):  score += 4
+    if "linkedin.com" in text_lower:                        score += 2
 
-    # 4. Projects / Experience (15)
     project_keywords = [
         "project", "projects", "internship", "experience", "developed",
-        "implemented", "created", "built", "designed", "dashboard", "api", "application"
+        "implemented", "created", "built", "designed",
+        "dashboard", "api", "application"
     ]
     project_hits = sum(1 for w in project_keywords if w in text_lower)
     if project_hits >= 6:   score += 15
@@ -285,33 +162,29 @@ def calculate_ats_score(resume_text: str, found_skills: list, missing_skills: li
     elif project_hits >= 2: score += 8
     elif project_hits >= 1: score += 4
 
-    # 5. Education (5)
-    edu_keywords = ["bca", "bsc", "btech", "mca", "msc", "degree", "university", "college"]
-    if any(k in text_lower for k in edu_keywords):
+    edu_kw = ["bca", "bsc", "btech", "mca", "msc", "degree", "university", "college"]
+    if any(k in text_lower for k in edu_kw):
         score += 5
 
-    # 6. Achievements (10)
-    achievement_words = ["improved", "increased", "reduced", "optimized",
-                         "achieved", "boosted", "led", "managed"]
-    a_hits = sum(1 for w in achievement_words if w in text_lower)
-    p_hits = len(re.findall(r'\d+%', resume_text))
+    ach_words = ["improved", "increased", "reduced", "optimized",
+                 "achieved", "boosted", "led", "managed"]
+    a_hits  = sum(1 for w in ach_words if w in text_lower)
+    p_hits  = len(re.findall(r"\d+%", resume_text))
     total_a = a_hits + p_hits
     if total_a >= 5:   score += 10
     elif total_a >= 3: score += 7
     elif total_a >= 1: score += 4
 
-    # 7. Resume Length (5)
     wc = len(resume_text.split())
-    if 300 <= wc <= 800:   score += 5
+    if   300 <= wc <= 800:  score += 5
     elif 200 <= wc <= 1000: score += 3
     else:                   score += 1
 
-    # 8. Formatting Quality (10)
     lines = resume_text.splitlines()
-    if len(lines) >= 15:          score += 3
-    if ":" in resume_text:        score += 2
+    if len(lines) >= 15:                         score += 3
+    if ":" in resume_text:                       score += 2
     if "-" in resume_text or "•" in resume_text: score += 3
-    if section_count >= 5:        score += 2
+    if section_count >= 5:                       score += 2
 
     score = min(score, 100)
 
@@ -328,37 +201,43 @@ def calculate_ats_score(resume_text: str, found_skills: list, missing_skills: li
 # ================================================================
 
 def run_analysis(resume: Resume) -> dict:
+    try:
+        ai_result = analyze_resume_ai(resume.extracted_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI analysis failed: {e}")
 
-    ai_result = analyze_resume_ai(resume.extracted_text)
-
-    role = (ai_result.get("predicted_role") or "").strip()
+    role           = (ai_result.get("predicted_role") or "").strip()
     found_skills   = [s for s in ai_result.get("found_skills",   []) if s]
     missing_skills = [s for s in ai_result.get("missing_skills", []) if s]
 
     if not role or role.lower() == "unknown":
         return {
-            "predicted_role": "Unknown",
-            "ats_score": 0,
-            "ats_status": "Not Available",
+            "predicted_role":   "Unknown",
+            "ats_score":        0,
+            "ats_status":       "Not Available",
             "role_match_score": 0,
-            "found_skills": [],
-            "missing_skills": [],
-            "strengths": [],
-            "improvements": ["Could not confidently identify a role for this resume"],
-            "recommendations": "",
-            "summary": "No role could be confidently predicted from this resume."
+            "found_skills":     [],
+            "missing_skills":   [],
+            "strengths":        [],
+            "improvements":     ["Could not confidently identify a role for this resume"],
+            "recommendations":  "",
+            "summary":          "No role could be confidently predicted from this resume.",
         }
 
     total_skills     = len(found_skills) + len(missing_skills)
     role_match_score = round((len(found_skills) / total_skills) * 100, 2) if total_skills else 0.0
     ats_score, ats_status = calculate_ats_score(resume.extracted_text, found_skills, missing_skills)
 
-    strengths = []
-    if found_skills:                        strengths.append(f"Matched {len(found_skills)} relevant skills")
-    if "%" in resume.extracted_text:        strengths.append("Contains quantified achievements")
-    if len(resume.extracted_text) > 800:    strengths.append("Detailed resume content")
-
+    strengths    = []
     improvements = []
+
+    if found_skills:
+        strengths.append(f"Matched {len(found_skills)} relevant skills")
+    if "%" in resume.extracted_text:
+        strengths.append("Contains quantified achievements")
+    if len(resume.extracted_text) > 800:
+        strengths.append("Detailed resume content")
+
     if missing_skills:
         improvements.append(f"Add missing skills: {', '.join(missing_skills)}")
     if "%" not in resume.extracted_text:
@@ -366,27 +245,29 @@ def run_analysis(resume: Resume) -> dict:
     if len(resume.extracted_text) < 500:
         improvements.append("Add more project and work experience details")
 
-    recommendations = get_ai_recommendations(
-        role, role_match_score, found_skills, missing_skills
-    )
+    try:
+        recommendations = get_ai_recommendations(role, role_match_score, found_skills, missing_skills)
+    except Exception as e:
+        recommendations = f"Recommendations unavailable: {e}"
 
     summary = (
         f"This resume matches {role_match_score}% of the required {role} skills. "
-        f"ATS score is {ats_score}%. The resume demonstrates {len(found_skills)} matching skills "
+        f"ATS score is {ats_score}%. "
+        f"The resume demonstrates {len(found_skills)} matching skills "
         f"and {len(missing_skills)} missing skills."
     )
 
     return {
-        "predicted_role":  role,
-        "ats_score":       ats_score,
-        "ats_status":      ats_status,
+        "predicted_role":   role,
+        "ats_score":        ats_score,
+        "ats_status":       ats_status,
         "role_match_score": role_match_score,
-        "found_skills":    found_skills,
-        "missing_skills":  missing_skills,
-        "strengths":       strengths,
-        "improvements":    improvements,
-        "recommendations": recommendations,
-        "summary":         summary,
+        "found_skills":     found_skills,
+        "missing_skills":   missing_skills,
+        "strengths":        strengths,
+        "improvements":     improvements,
+        "recommendations":  recommendations,
+        "summary":          summary,
     }
 
 
@@ -399,14 +280,15 @@ def first_start():
     return {"message": "Hi there, Welcome to Resume Analyzer"}
 
 
+# ── USER: Upload resume (requires login) ─────────────────────────────────────
+
 @app.post("/upload-resume")
 async def upload_resume(
-    name: str,
-    email: str,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    file: UploadFile          = File(...),
+    current_user: User        = Depends(get_current_user),   # must be logged in
+    db: Session               = Depends(get_db),
 ):
-    ALLOWED = [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".bmp"]
+    ALLOWED   = [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".bmp"]
     extension = os.path.splitext(file.filename)[1].lower()
 
     if extension not in ALLOWED:
@@ -415,30 +297,23 @@ async def upload_resume(
             detail=f"Unsupported file type '{extension}'. Allowed: {', '.join(ALLOWED)}"
         )
 
-   # Save to disk
-    file_path = os.path.join(UPLOAD_DIR, os.path.basename(file.filename))
     content = await file.read()
 
-# File size validation (5 MB)
-    MAX_FILE_SIZE = 5 * 1024 * 1024
-
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-        status_code=400,
-        detail="File size exceeds 5MB limit"
-    )
+        raise HTTPException(status_code=400, detail="File size exceeds the 5 MB limit.")
 
+    file_path = os.path.join(UPLOAD_DIR, os.path.basename(file.filename))
     with open(file_path, "wb") as buffer:
         buffer.write(content)
 
-    # Extract text — for DOCX pass raw bytes directly (avoids re-read issues)
-    if extension == ".docx":
-        extracted_text = extract_text_from_docx_bytes(content)
-    else:
-        extracted_text = extract_text(file_path, extension)
+    extracted_text = (
+        extract_text_from_docx_bytes(content)
+        if extension == ".docx"
+        else extract_text(file_path, extension)
+    )
 
     print("========== EXTRACTED TEXT ==========")
-    print(f"Length: {len(extracted_text)} chars")
+    print(f"Length : {len(extracted_text)} chars")
     print(extracted_text[:3000])
     print("====================================")
 
@@ -447,37 +322,33 @@ async def upload_resume(
             status_code=400,
             detail=(
                 "Could not extract any text from the file. "
-                "For DOCX: ensure it's a real Word document, not renamed. "
-                "For images: ensure text is clearly visible and not handwritten. "
+                "For images: ensure text is clearly visible. "
                 "Try converting to PDF for best results."
             )
         )
 
-    # Upsert user
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        user = User(name=name, email=email)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-    # Save resume record
-    resume = Resume(user_id=user.id, file_name=file.filename, extracted_text=extracted_text)
+    # Save resume — linked to the authenticated user
+    resume = Resume(
+        user_id        = current_user.id,
+        file_name      = file.filename,
+        file_path      = file_path,
+        extracted_text = extracted_text,
+    )
     db.add(resume)
     db.commit()
     db.refresh(resume)
 
-    # Run analysis
     result = run_analysis(resume)
 
-    # Save analysis result
     analysis = AnalysisResult(
-        resume_id=resume.id,
-        role=result["predicted_role"],
-        score=result["role_match_score"],
-        missing_skills=", ".join(result["missing_skills"]),
-        strengths=", ".join(result["strengths"]),
-        recommendations=result["recommendations"],
+        resume_id      = resume.id,
+        role           = result["predicted_role"],
+        score          = result["role_match_score"],
+        ats_score      = result["ats_score"],
+        ats_status     = result["ats_status"],
+        missing_skills = ", ".join(result["missing_skills"]),
+        strengths      = ", ".join(result["strengths"]),
+        recommendations= result["recommendations"],
     )
     db.add(analysis)
     db.commit()
@@ -485,42 +356,255 @@ async def upload_resume(
     return {"resume_id": resume.id, "filename": file.filename, **result}
 
 
-@app.get("/analysis-history")
-def get_analysis_history(db: Session = Depends(get_db)):
-    results = db.query(AnalysisResult).all()
+# ── USER: Own analysis history ────────────────────────────────────────────────
+
+@app.get("/my-history")
+def my_history(
+    current_user: User = Depends(get_current_user),
+    db: Session        = Depends(get_db),
+):
+    """Returns only the analyses for resumes belonging to the logged-in user."""
+    resumes = db.query(Resume).filter(Resume.user_id == current_user.id).all()
+    resume_ids = {r.id for r in resumes}
+
+    results = (
+        db.query(AnalysisResult)
+        .filter(AnalysisResult.resume_id.in_(resume_ids))
+        .all()
+    )
     return [
         {
-            "id": r.id,
-            "resume_id": r.resume_id,
-            "role": r.role,
-            "score": r.score,
+            "id":             r.id,
+            "resume_id":      r.resume_id,
+            "role":           r.role,
+            "score":          r.score,
+            "ats_score":      r.ats_score,
+            "ats_status":     r.ats_status,
             "missing_skills": r.missing_skills,
-            "strengths": r.strengths,
-            "recommendations": r.recommendations,
-            "created_at": str(r.created_at),
+            "strengths":      r.strengths,
+            "recommendations":r.recommendations,
+            "created_at":     str(r.created_at),
         }
         for r in results
     ]
 
 
+# ── USER: Own uploaded resumes ────────────────────────────────────────────────
+
+@app.get("/my-resumes")
+def my_resumes(
+    current_user: User = Depends(get_current_user),
+    db: Session        = Depends(get_db),
+):
+    """Returns only resumes uploaded by the logged-in user."""
+    resumes = db.query(Resume).filter(Resume.user_id == current_user.id).all()
+    return [
+        {
+            "id":          r.id,
+            "file_name":   r.file_name,
+            "uploaded_at": str(r.uploaded_at),
+        }
+        for r in resumes
+    ]
+
+
+# ── USER: Get own resume by ID ────────────────────────────────────────────────
+
 @app.get("/resume/{resume_id}")
-def get_resume(resume_id: int, db: Session = Depends(get_db)):
+def get_resume(
+    resume_id:    int,
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
     resume = db.query(Resume).filter(Resume.id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+
+    # USER can only view their own; AGENT can view any
+    if current_user.role != "AGENT" and resume.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     return {
-        "id": resume.id,
-        "file_name": resume.file_name,
-        "uploaded_at": resume.uploaded_at,
+        "id":             resume.id,
+        "file_name":      resume.file_name,
+        "uploaded_at":    str(resume.uploaded_at),
         "extracted_text": resume.extracted_text,
     }
 
 
+# ── USER: Delete own resume ───────────────────────────────────────────────────
+
 @app.delete("/resume/{resume_id}")
-def delete_resume(resume_id: int, db: Session = Depends(get_db)):
+def delete_resume(
+    resume_id:    int,
+    current_user: User    = Depends(get_current_user),
+    db:           Session = Depends(get_db),
+):
     resume = db.query(Resume).filter(Resume.id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+
+    if current_user.role != "AGENT" and resume.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     db.delete(resume)
     db.commit()
     return {"message": "Resume deleted successfully"}
+
+
+# ================================================================
+# AGENT-ONLY ROUTES
+# ================================================================
+
+@app.get("/agent/users")
+def agent_all_users(
+    _:  User    = Depends(require_agent),
+    db: Session = Depends(get_db),
+):
+    """AGENT: view all registered users."""
+    users = db.query(User).all()
+    return [
+        {
+            "id":          u.id,
+            "name":        u.name,
+            "email":       u.email,
+            "role":        u.role,
+            "is_verified": u.is_verified,
+            "created_at":  str(u.created_at),
+        }
+        for u in users
+    ]
+
+
+@app.get("/agent/resumes")
+def agent_all_resumes(
+    agent: User = Depends(require_agent),
+    db: Session = Depends(get_db)
+):
+    """AGENT: view EVERY uploaded resume — with predicted role, ATS score and
+    role-match score where available. Uses an OUTER JOIN so a resume is never
+    hidden just because it hasn't been analysed yet (e.g. analysis failed)."""
+
+    rows = db.query(
+        Resume,
+        AnalysisResult
+    ).outerjoin(
+        AnalysisResult,
+        Resume.id == AnalysisResult.resume_id
+    ).order_by(Resume.uploaded_at.desc()).all()
+
+    data = []
+    for resume, analysis in rows:
+        data.append({
+            "resume_id":        resume.id,
+            "user_id":          resume.user_id,
+            "file_name":        resume.file_name,
+            "predicted_role":   analysis.role if analysis else "Not analyzed",
+            "ats_score":        analysis.ats_score if analysis else None,
+            "ats_status":       analysis.ats_status if analysis else None,
+            "role_match_score": analysis.score if analysis else None,
+            "missing_skills":   analysis.missing_skills if analysis else None,
+            "uploaded_at":      str(resume.uploaded_at),
+        })
+
+    return data
+
+
+@app.get("/agent/search-role")
+def search_role(
+    role: str,
+    agent: User = Depends(require_agent),
+    db: Session = Depends(get_db)
+):
+    """AGENT: search resumes by the AI's predicted role (e.g. 'teacher').
+    Works for ANY source file type — PDF, DOC, DOCX, or image (PNG/JPG/etc),
+    since role detection always runs on the OCR/extracted text regardless of
+    the original format. Returns everything needed to view/download."""
+
+    results = db.query(
+        Resume,
+        AnalysisResult
+    ).join(
+        AnalysisResult,
+        Resume.id == AnalysisResult.resume_id
+    ).filter(
+        AnalysisResult.role.ilike(f"%{role}%")
+    ).order_by(Resume.uploaded_at.desc()).all()
+
+    data = []
+    for resume, analysis in results:
+        data.append({
+            "resume_id":        resume.id,
+            "user_id":          resume.user_id,
+            "file_name":        resume.file_name,
+            "predicted_role":   analysis.role,
+            "ats_score":        analysis.ats_score,
+            "ats_status":       analysis.ats_status,
+            "role_match_score": analysis.score,
+            "missing_skills":   analysis.missing_skills,
+            "uploaded_at":      str(resume.uploaded_at),
+        })
+
+    return data
+
+
+@app.get("/agent/analysis-history")
+def agent_all_analysis(
+    _:  User    = Depends(require_agent),
+    db: Session = Depends(get_db),
+):
+    """AGENT: view all analysis results across all users."""
+    results = db.query(AnalysisResult).all()
+    return [
+        {
+            "id":             r.id,
+            "resume_id":      r.resume_id,
+            "role":           r.role,
+            "score":          r.score,
+            "ats_score":      r.ats_score,
+            "ats_status":     r.ats_status,
+            "missing_skills": r.missing_skills,
+            "strengths":      r.strengths,
+            "recommendations":r.recommendations,
+            "created_at":     str(r.created_at),
+        }
+        for r in results
+    ]
+
+
+@app.get("/agent/download/{resume_id}")
+def download_resume(
+    resume_id: int,
+    agent: User = Depends(require_agent),
+    db: Session = Depends(get_db)
+):
+    """AGENT: download the ORIGINAL uploaded file for any resume — works for
+    PDF, DOC, DOCX, and image formats (PNG/JPG/JPEG/WEBP/BMP) alike, since the
+    raw bytes are stored as-is on disk regardless of file type."""
+
+    resume = db.query(Resume).filter(
+        Resume.id == resume_id
+    ).first()
+
+    if not resume:
+        raise HTTPException(
+            status_code=404,
+            detail="Resume not found"
+        )
+
+    file_path = os.path.join(
+        UPLOAD_DIR,
+        os.path.basename(resume.file_name)
+    )
+
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Original file is missing from storage."
+        )
+
+    return FileResponse(
+        file_path,
+        filename=resume.file_name,
+        media_type="application/octet-stream",
+    )

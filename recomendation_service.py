@@ -9,6 +9,7 @@ load_dotenv()
 client = InferenceClient(
     api_key=os.getenv("HF_API_KEY")
 )
+print("HF API KEY:", os.getenv("HF_API_KEY"))
 
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 
